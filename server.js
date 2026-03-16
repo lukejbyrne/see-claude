@@ -1867,14 +1867,12 @@ const server = http.createServer((req, res) => {
         // AppleScript: find tab, type message from file, press enter
         const script = [
           'tell application "Terminal"',
-          '  activate',
           '  repeat with w from 1 to count of windows',
           '    set win to window w',
           '    repeat with t from 1 to count of tabs of win',
           '      set theTab to tab t of win',
           `      if tty of theTab contains "${ttyNum}" then`,
           '        set selected tab of win to theTab',
-          '        set index of win to 1',
           '        delay 0.2',
           '        tell application "System Events"',
           '          tell process "Terminal"',
