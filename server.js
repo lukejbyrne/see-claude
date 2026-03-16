@@ -140,6 +140,65 @@ function getRecentSessions(limit = 20) {
   } catch { return []; }
 }
 
+// --- Project roster ---
+
+function getProjectRoster() {
+  try {
+    if (!fs.existsSync(PROJECTS_DIR)) return [];
+    const projects = [];
+    for (const projDir of fs.readdirSync(PROJECTS_DIR)) {
+      const projPath = path.join(PROJECTS_DIR, projDir);
+      if (!fs.statSync(projPath).isDirectory()) continue;
+      const files = fs.readdirSync(projPath)
+        .filter(f => f.endsWith('.jsonl') && !f.includes('subagent'))
+        .map(f => ({ name: f, mtime: fs.statSync(path.join(projPath, f)).mtimeMs }))
+        .sort((a, b) => b.mtime - a.mtime);
+      if (!files.length) continue;
+
+      // Reconstruct the real path from the dir name
+      const cwd = projDir.replace(/-/g, '/');
+      let projectName = projDir
+        .replace(/-Users-[^-]+-Documents-/, '')
+        .replace(/-Users-[^-]+-Downloads-?/, '~/Downloads/')
+        .replace(/-Users-[^-]+-/, '~/')
+        .replace(/^-Users-[^-]+$/, '~');
+
+      // Get latest session ID and first message
+      const latestSession = path.basename(files[0].name, '.jsonl');
+      let firstMessage = '';
+      try {
+        const fd = fs.openSync(path.join(projPath, files[0].name), 'r');
+        const buf = Buffer.alloc(8192);
+        const bytesRead = fs.readSync(fd, buf, 0, 8192, 0);
+        fs.closeSync(fd);
+        for (const line of buf.toString('utf8', 0, bytesRead).split('\n').filter(Boolean)) {
+          try {
+            const d = JSON.parse(line);
+            if (d.type === 'user' && d.message?.role === 'user') {
+              const content = d.message.content;
+              if (typeof content === 'string') firstMessage = content.slice(0, 120);
+              else if (Array.isArray(content)) { for (const c of content) { if (c.type === 'text') { firstMessage = c.text.slice(0, 120); break; } } }
+              break;
+            }
+          } catch {}
+        }
+      } catch {}
+
+      projects.push({
+        dirKey: projDir,
+        cwd,
+        projectName,
+        latestSession,
+        sessionCount: files.length,
+        lastModified: files[0].mtime,
+        lastModifiedStr: formatTimeAgo(new Date(files[0].mtime)),
+        firstMessage: firstMessage || '(no message)',
+      });
+    }
+    return projects.sort((a, b) => b.lastModified - a.lastModified);
+  } catch { return []; }
+}
+
 function formatTimeAgo(date) {
   const s = Math.floor((Date.now() - date.getTime()) / 1000);
   if (s < 60) return 'just now';
@@ -151,7 +210,7 @@ function formatTimeAgo(date) {
 // --- SSE ---
 const sseClients = new Set();
 setInterval(() => {
-  const data = JSON.stringify({ live: getClaudeSessions(), recent: getRecentSessions() });
+  const data = JSON.stringify({ live: getClaudeSessions(), recent: getRecentSessions(), roster: getProjectRoster() });
   for (const res of sseClients) {
     try { res.write(`data: ${data}\n\n`); } catch { sseClients.delete(res); }
   }
@@ -502,6 +561,11 @@ const HTML = `<!DOCTYPE html>
   }
   .pixel-status {
     font-size: 9px; text-transform: uppercase; letter-spacing: 1px; margin-top: 2px;
+  }
+  .pixel-station.offline { opacity: 0.5; }
+  .pixel-station.offline:hover { opacity: 0.8; }
+  .pixel-last-active {
+    font-size: 8px; color: #444; margin-top: 2px;
   }
 
   /* Pixel modal overlay */
@@ -1033,6 +1097,20 @@ async function pixelOpenTerminal(event) {
   try { await fetch('/api/focus?tty=' + encodeURIComponent(pixelDialogTty) + '&pid=' + encodeURIComponent(pixelDialogPid)); } catch {}
 }
 
+// --- Wake offline project ---
+async function wakeProject(cwd, sessionId) {
+  const skip = document.getElementById('skip-perms-toggle')?.checked;
+  try {
+    const r = await fetch('/api/launch', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ sessionId, cwd, skipPerms: skip }),
+    });
+    const d = await r.json();
+    showToast(d.ok ? 'Waking up session in new Terminal tab' : 'Launch failed');
+  } catch { showToast('Launch failed'); }
+}
+
 // --- View toggle ---
 let currentView = localStorage.getItem('see-claude-view') || 'terminal';
 
@@ -1306,33 +1384,177 @@ function drawPixelCharacter(canvas, status, frame, pid) {
   }
 }
 
+function drawSleepingCharacter(canvas, frame, dirKey) {
+  const ctx = canvas.getContext('2d');
+  const w = canvas.width;
+  const h = canvas.height;
+  ctx.imageSmoothingEnabled = false;
+  ctx.clearRect(0, 0, w, h);
+
+  const p = PX;
+  const cx = Math.floor(w / 2);
+  const t = getCharTraits(dirKey || '0');
+
+  const desk = '#5a4410';
+  const deskDark = '#4a3a0d';
+
+  // === DESK (dimmed) ===
+  ctx.fillStyle = desk;
+  ctx.fillRect(cx - 22*p, 26*p, 44*p, 3*p);
+  ctx.fillStyle = deskDark;
+  ctx.fillRect(cx - 22*p, 29*p, 44*p, p);
+  ctx.fillRect(cx - 20*p, 30*p, 2*p, 8*p);
+  ctx.fillRect(cx + 18*p, 30*p, 2*p, 8*p);
+
+  // === MONITOR OFF ===
+  ctx.fillStyle = '#1a1a1a';
+  ctx.fillRect(cx - 8*p, 16*p, 16*p, 10*p);
+  ctx.fillStyle = '#111';
+  ctx.fillRect(cx - 7*p, 17*p, 14*p, 8*p);
+  // Standby dot
+  ctx.fillStyle = '#333';
+  ctx.fillRect(cx, 20*p, p, p);
+  // Stand
+  ctx.fillStyle = '#222';
+  ctx.fillRect(cx - 2*p, 26*p, 4*p, p);
+  ctx.fillRect(cx - p, 25*p, 2*p, p);
+
+  // === CHAIR ===
+  ctx.fillStyle = '#2a2a2a';
+  ctx.fillRect(cx + 14*p, 22*p, 6*p, 2*p);
+  ctx.fillRect(cx + 18*p, 16*p, 2*p, 6*p);
+  ctx.fillRect(cx + 15*p, 24*p, p, 6*p);
+  ctx.fillRect(cx + 19*p, 24*p, p, 6*p);
+  ctx.fillStyle = '#222';
+  ctx.fillRect(cx + 14*p, 30*p, 2*p, p);
+  ctx.fillRect(cx + 19*p, 30*p, 2*p, p);
+
+  // === SLEEPING CHARACTER (head on desk) ===
+  const charX = cx + 4*p;
+  const charY = 22*p;
+
+  // Body slumped forward
+  ctx.fillStyle = t.shirt;
+  ctx.globalAlpha = 0.6;
+  ctx.fillRect(charX, charY - 4*p, 6*p, 5*p);
+
+  // Arms on desk
+  ctx.fillRect(charX - 2*p, charY - 2*p, 2*p, 3*p);
+  ctx.fillRect(charX + 6*p, charY - 2*p, 2*p, 3*p);
+  ctx.fillStyle = t.skin;
+  ctx.fillRect(charX - 3*p, charY, 3*p, p);
+  ctx.fillRect(charX + 6*p, charY, 3*p, p);
+
+  // Head resting on arms
+  ctx.fillStyle = t.skin;
+  ctx.fillRect(charX + p, charY - 6*p, 4*p, 3*p);
+
+  // Hair
+  ctx.fillStyle = t.hair;
+  ctx.fillRect(charX, charY - 7*p, 6*p, 2*p);
+
+  // ZZZ
+  ctx.fillStyle = '#555';
+  const zOff = frame % 3;
+  ctx.fillRect(charX + 8*p, charY - (8 + zOff)*p, 2*p, p);
+  if (zOff > 0) ctx.fillRect(charX + 10*p, charY - (10 + zOff)*p, 3*p, p);
+  if (zOff > 1) ctx.fillRect(charX + 13*p, charY - (12 + zOff)*p, 3*p, p);
+
+  // Legs under desk
+  ctx.fillStyle = t.pants;
+  ctx.fillRect(charX, charY + p, 3*p, 4*p);
+  ctx.fillRect(charX + 3*p, charY + p, 3*p, 4*p);
+
+  ctx.globalAlpha = 1.0;
+
+  // Keyboard
+  ctx.fillStyle = '#1a1a1a';
+  ctx.fillRect(cx - 4*p, 25*p, 8*p, 2*p);
+}
+
 function renderPixel(sessions) {
   const floor = document.getElementById('pixel-floor');
   if (!floor) return;
   document.getElementById('count').textContent = sessions.length;
 
-  floor.innerHTML = sessions.map(s => \`
-    <div class="pixel-station" onclick="openPixelDialog('\${s.pid}', '\${s.tty}')">
-      <canvas id="pxc-\${s.pid}" width="200" height="160" style="image-rendering:pixelated"></canvas>
-      <div class="pixel-label">\${escapeHtml(s.projectName)}</div>
-      <div class="pixel-status" style="color:\${getStatusColor(s.status)}">\${getStatusLabel(s.status)}</div>
-      <button class="quick-terminal" onclick="event.stopPropagation();openTerminal('\${s.tty}','\${s.pid}',event)" style="margin-top:4px">&gt;_ terminal</button>
-    </div>
-  \`).join('');
+  // Build roster: merge known projects with live sessions
+  const roster = lastData?.roster || [];
+  const liveByCwd = {};
+  sessions.forEach(s => { liveByCwd[s.cwd] = s; });
 
-  // Draw each character
+  // Build items: live sessions first, then offline projects
+  const items = [];
+  const shownCwds = new Set();
+
+  // Live sessions always show
+  sessions.forEach(s => {
+    items.push({ type: 'live', session: s });
+    shownCwds.add(s.cwd);
+  });
+
+  // Offline projects from roster (most recent first, capped)
+  let offlineCount = 0;
+  roster.forEach(r => {
+    if (!shownCwds.has(r.cwd) && offlineCount < 12) {
+      items.push({ type: 'offline', project: r });
+      shownCwds.add(r.cwd);
+      offlineCount++;
+    }
+  });
+
+  floor.innerHTML = items.map((item, i) => {
+    if (item.type === 'live') {
+      const s = item.session;
+      return \`
+        <div class="pixel-station" onclick="openPixelDialog('\${s.pid}', '\${s.tty}')">
+          <canvas id="pxc-\${s.pid}" width="200" height="160" style="image-rendering:pixelated"></canvas>
+          <div class="pixel-label">\${escapeHtml(s.projectName)}</div>
+          <div class="pixel-status" style="color:\${getStatusColor(s.status)}">\${getStatusLabel(s.status)}</div>
+          <button class="quick-terminal" onclick="event.stopPropagation();openTerminal('\${s.tty}','\${s.pid}',event)" style="margin-top:4px">&gt;_ terminal</button>
+        </div>
+      \`;
+    } else {
+      const r = item.project;
+      return \`
+        <div class="pixel-station offline" onclick="wakeProject('\${escapeHtml(r.cwd)}', '\${escapeHtml(r.latestSession)}')">
+          <canvas id="pxr-\${r.dirKey}" width="200" height="160" style="image-rendering:pixelated"></canvas>
+          <div class="pixel-label">\${escapeHtml(r.projectName)}</div>
+          <div class="pixel-status" style="color:#444">offline</div>
+          <div class="pixel-last-active">\${r.lastModifiedStr}</div>
+        </div>
+      \`;
+    }
+  }).join('');
+
+  // Draw live characters
   sessions.forEach(s => {
     const canvas = document.getElementById('pxc-' + s.pid);
     if (canvas) drawPixelCharacter(canvas, s.status, pixelAnimFrame, s.pid);
+  });
+
+  // Draw sleeping characters for offline projects
+  roster.forEach(r => {
+    if (!liveByCwd[r.cwd]) {
+      const canvas = document.getElementById('pxr-' + r.dirKey);
+      if (canvas) drawSleepingCharacter(canvas, pixelAnimFrame, r.dirKey);
+    }
   });
 }
 
 // Animate pixel view
 setInterval(() => {
   if (currentView === 'pixel' && lastData) {
+    const liveCwds = new Set(lastData.live.map(s => s.cwd));
     lastData.live.forEach(s => {
       const canvas = document.getElementById('pxc-' + s.pid);
       if (canvas) drawPixelCharacter(canvas, s.status, pixelAnimFrame, s.pid);
+    });
+    // Animate sleeping characters (ZZZ floats)
+    (lastData.roster || []).forEach(r => {
+      if (!liveCwds.has(r.cwd)) {
+        const canvas = document.getElementById('pxr-' + r.dirKey);
+        if (canvas) drawSleepingCharacter(canvas, pixelAnimFrame, r.dirKey);
+      }
     });
   }
 }, 400);
@@ -1394,13 +1616,13 @@ const server = http.createServer((req, res) => {
 
   if (url.pathname === '/api/sessions') {
     res.writeHead(200, { 'Content-Type': 'application/json' });
-    res.end(JSON.stringify({ live: getClaudeSessions(), recent: getRecentSessions() }));
+    res.end(JSON.stringify({ live: getClaudeSessions(), recent: getRecentSessions(), roster: getProjectRoster() }));
 
   } else if (url.pathname === '/api/stream') {
     res.writeHead(200, { 'Content-Type': 'text/event-stream', 'Cache-Control': 'no-cache', 'Connection': 'keep-alive' });
     res.write('\n');
     sseClients.add(res);
-    const data = JSON.stringify({ live: getClaudeSessions(), recent: getRecentSessions() });
+    const data = JSON.stringify({ live: getClaudeSessions(), recent: getRecentSessions(), roster: getProjectRoster() });
     res.write(`data: ${data}\n\n`);
     req.on('close', () => sseClients.delete(res));
 
