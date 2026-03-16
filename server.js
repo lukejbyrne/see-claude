@@ -1099,12 +1099,11 @@ async function pixelOpenTerminal(event) {
 
 // --- Wake offline project ---
 async function wakeProject(cwd, sessionId) {
-  const skip = document.getElementById('skip-perms-toggle')?.checked;
   try {
     const r = await fetch('/api/launch', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ sessionId, cwd, skipPerms: skip }),
+      body: JSON.stringify({ sessionId, cwd, skipPerms: true }),
     });
     const d = await r.json();
     showToast(d.ok ? 'Waking up session in new Terminal tab' : 'Launch failed');
