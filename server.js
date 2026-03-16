@@ -25,13 +25,21 @@ function getClaudeSessions() {
         try { cwd = execSync(`lsof -p ${pid} -Fn 2>/dev/null | grep '^n/' | head -1`, { encoding: 'utf8' }).trim().replace(/^n/, ''); } catch {}
         if (!cwd) try { cwd = execSync(`lsof -p ${pid} 2>/dev/null | grep cwd | awk '{print $NF}'`, { encoding: 'utf8' }).trim(); } catch {}
 
-        const cpuNum = parseFloat(cpu);
-        let status = 'idle';
-        if (cpuNum > 15) status = 'working';
-        else if (cpuNum > 5) status = 'thinking';
-
         // Get recent messages from session file
-        const messages = getSessionMessages(cwd);
+        const messages = getSessionMessages(cwd, 20);
+
+        // Determine status from session file, not CPU
+        let status = 'idle';
+        if (messages.length) {
+          const last = messages[messages.length - 1];
+          if (last.role === 'user') status = 'working'; // waiting for Claude to respond
+          else if (last.hasToolUse) status = 'thinking'; // Claude is using tools
+        }
+        // Fallback to CPU for sessions without message history
+        if (status === 'idle' && !messages.length) {
+          const cpuNum = parseFloat(cpu);
+          if (cpuNum > 15) status = 'working';
+        }
 
         return {
           pid: pidStr, tty, cpu: `${cpu}%`, mem: `${mem}%`, elapsed, cwd,
@@ -44,7 +52,7 @@ function getClaudeSessions() {
   } catch { return []; }
 }
 
-function getSessionMessages(cwd, count = 8) {
+function getSessionMessages(cwd, count = 20) {
   if (!cwd) return [];
   const projKey = cwd.replace(/\//g, '-');
   const projDir = path.join(PROJECTS_DIR, projKey);
@@ -79,7 +87,12 @@ function getSessionMessages(cwd, count = 8) {
             if (c.type === 'text' && c.text?.trim()) { text = c.text.trim(); break; }
           }
         }
-        if (text) msgs.push({ role, text: text.slice(0, 300) });
+        // Check if assistant message contains tool_use
+        let hasToolUse = false;
+        if (role === 'assistant' && Array.isArray(content)) {
+          hasToolUse = content.some(c => c.type === 'tool_use');
+        }
+        if (text) msgs.push({ role, text: text.slice(0, 300), hasToolUse });
       } catch {}
     }
     return msgs.slice(-count);
@@ -243,7 +256,11 @@ const HTML = `<!DOCTYPE html>
   }
 
   .project-name { font-size: 14px; font-weight: 500; color: #e0e0e0; margin-bottom: 2px; }
-  .project-path { font-size: 9px; color: #393939; word-break: break-all; margin-bottom: 6px; }
+  .project-path { font-size: 9px; color: #393939; word-break: break-all; margin-bottom: 4px; }
+  .first-prompt {
+    font-size: 9px; color: #666; font-style: italic; margin-bottom: 6px;
+    overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  }
 
   /* Last message preview (collapsed) */
   .last-msg-preview {
@@ -266,6 +283,17 @@ const HTML = `<!DOCTYPE html>
 
   .stand { width: 40px; height: 10px; background: #181818; margin: 0 auto; border-radius: 0 0 4px 4px; }
   .base { width: 60px; height: 3px; background: #181818; margin: 0 auto; border-radius: 2px; }
+
+  .quick-terminal {
+    background: #1a2e1a; border: 1px solid #2a3e2a; color: #4a4;
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 9px; padding: 4px 10px;
+    border-radius: 4px; cursor: pointer; transition: all 0.2s;
+    display: block; margin: 6px auto 0; text-align: center;
+    opacity: 0.5;
+  }
+  .station:hover .quick-terminal { opacity: 1; }
+  .quick-terminal:hover { background: #2a3e2a; color: #27c93f; border-color: #27c93f; }
 
   /* --- Expanded view --- */
   .expanded-content { display: none; }
@@ -331,37 +359,10 @@ const HTML = `<!DOCTYPE html>
   }
   .sent-flash.visible { opacity: 1; }
 
-  /* --- Mode toggle --- */
-  .mode-toggle { display: flex; justify-content: center; gap: 0; margin-bottom: 24px; }
-  .mode-btn {
-    background: #111; border: 1px solid #222; color: #444;
-    font-family: 'JetBrains Mono', monospace; font-size: 10px;
-    padding: 6px 20px; cursor: pointer; transition: all 0.2s;
-    letter-spacing: 2px; text-transform: uppercase;
-  }
-  .mode-btn:first-child { border-radius: 4px 0 0 4px; }
-  .mode-btn:last-child { border-radius: 0 4px 4px 0; border-left: none; }
-  .mode-btn.active { background: #1a1a2e; color: #cc7832; border-color: #cc783244; }
-  .mode-btn:hover:not(.active) { color: #888; }
-
-  /* --- Advanced panel --- */
-  .skip-perms { display: flex; align-items: center; gap: 8px; padding: 10px 16px; margin-bottom: 12px; }
-  .toggle-switch { position: relative; width: 32px; height: 18px; cursor: pointer; }
-  .toggle-switch input { opacity: 0; width: 0; height: 0; }
-  .toggle-slider {
-    position: absolute; top: 0; left: 0; right: 0; bottom: 0;
-    background: #222; border-radius: 9px; transition: 0.2s;
-  }
-  .toggle-slider::before {
-    content: ''; position: absolute; width: 14px; height: 14px;
-    left: 2px; bottom: 2px; background: #555; border-radius: 50%; transition: 0.2s;
-  }
-  .toggle-switch input:checked + .toggle-slider { background: #cc783244; }
-  .toggle-switch input:checked + .toggle-slider::before { transform: translateX(14px); background: #cc7832; }
-  .skip-perms-label { font-size: 10px; color: #555; cursor: pointer; }
-  .skip-perms-warn { font-size: 9px; color: #cc783266; margin-left: 4px; }
-
-  .recent-section { margin-top: auto; padding-top: 20px; width: 100%; }
+  .recent-section { margin-top: auto; padding-top: 20px; width: 100%; max-height: 350px; overflow-y: auto; scrollbar-width: thin; scrollbar-color: #333 transparent; }
+  .recent-section::-webkit-scrollbar { width: 4px; }
+  .recent-section::-webkit-scrollbar-thumb { background: #333; border-radius: 2px; }
+  .recent-live td { color: #888 !important; }
   .recent-table { width: 100%; border-collapse: collapse; }
   .recent-table th {
     font-size: 9px; font-weight: 400; color: #444; text-transform: uppercase;
@@ -396,6 +397,146 @@ const HTML = `<!DOCTYPE html>
   }
   .copy-toast.visible { opacity: 1; transform: translateX(-50%) translateY(0); }
 
+  /* New session card */
+  .new-screen {
+    display: flex; flex-direction: column; align-items: center;
+    justify-content: center; min-height: 120px;
+  }
+  .new-plus {
+    font-size: 36px; font-weight: 200; color: #333;
+    transition: color 0.2s;
+  }
+  .new-label {
+    font-size: 10px; color: #333; text-transform: uppercase;
+    letter-spacing: 2px; margin-top: 4px; transition: color 0.2s;
+  }
+  .station.new-session:hover .new-plus { color: #cc7832; }
+  .station.new-session:hover .new-label { color: #cc7832; }
+  .station.new-session .monitor { border-style: dashed; }
+
+  /* New session modal */
+  .modal-overlay {
+    position: fixed; top: 0; left: 0; right: 0; bottom: 0;
+    background: rgba(0,0,0,0.7); z-index: 200;
+    display: flex; align-items: center; justify-content: center;
+    opacity: 0; pointer-events: none; transition: opacity 0.2s;
+  }
+  .modal-overlay.visible { opacity: 1; pointer-events: all; }
+  .modal {
+    background: #111; border: 1px solid #222; border-radius: 8px;
+    padding: 24px; width: 420px; max-width: 90vw;
+  }
+  .modal h2 {
+    font-size: 14px; font-weight: 400; color: #ccc;
+    margin-bottom: 16px; letter-spacing: 1px;
+  }
+  .modal-field { margin-bottom: 12px; }
+  .modal-field label {
+    display: block; font-size: 10px; color: #555;
+    text-transform: uppercase; letter-spacing: 1px; margin-bottom: 6px;
+  }
+  .modal-input {
+    width: 100%; background: #0d1117; border: 1px solid #2a2a3e; color: #e0e0e0;
+    font-family: 'JetBrains Mono', monospace; font-size: 12px;
+    padding: 10px 12px; border-radius: 4px; outline: none;
+  }
+  .modal-input:focus { border-color: #cc7832; }
+  .modal-input::placeholder { color: #333; }
+  .modal-actions { display: flex; gap: 8px; margin-top: 16px; justify-content: flex-end; }
+  .dir-browser {
+    max-height: 180px; overflow-y: auto; margin-top: 6px;
+    background: #0a0e14; border: 1px solid #1a1a2e; border-radius: 4px;
+    scrollbar-width: thin; scrollbar-color: #333 transparent;
+  }
+  .dir-browser::-webkit-scrollbar { width: 4px; }
+  .dir-browser::-webkit-scrollbar-thumb { background: #333; border-radius: 2px; }
+  .dir-entry {
+    padding: 6px 10px; font-size: 11px; color: #888; cursor: pointer;
+    display: flex; align-items: center; gap: 6px; transition: background 0.1s;
+  }
+  .dir-entry:hover { background: #1a1a2e; color: #cc7832; }
+  .dir-icon { color: #555; font-size: 10px; }
+  .dir-up { color: #666; font-style: italic; }
+  .modal-check {
+    display: flex; align-items: center; gap: 8px; margin-top: 4px;
+  }
+  .modal-check input[type="checkbox"] { accent-color: #cc7832; }
+  .modal-check label { font-size: 10px; color: #555; cursor: pointer; }
+
+  /* View toggle */
+  .view-toggle {
+    position: fixed; top: 16px; right: 20px; z-index: 50;
+    display: flex; gap: 0;
+  }
+  .view-btn {
+    background: #111; border: 1px solid #222; color: #444;
+    font-family: 'JetBrains Mono', monospace; font-size: 10px;
+    padding: 6px 14px; cursor: pointer; transition: all 0.2s;
+  }
+  .view-btn:first-child { border-radius: 4px 0 0 4px; }
+  .view-btn:last-child { border-radius: 0 4px 4px 0; border-left: none; }
+  .view-btn.active { background: #1a1a2e; color: #cc7832; border-color: #cc783244; }
+
+  /* Pixel art view */
+  .pixel-view { display: none; width: 100%; }
+  .pixel-view.active { display: block; }
+  .pixel-floor {
+    display: flex; flex-wrap: wrap; justify-content: center;
+    gap: 40px; padding: 20px;
+  }
+  .pixel-station {
+    display: flex; flex-direction: column; align-items: center;
+    cursor: pointer; transition: transform 0.2s;
+  }
+  .pixel-station:hover { transform: translateY(-4px); }
+  .pixel-label {
+    font-size: 11px; color: #888; margin-top: 8px; text-align: center;
+  }
+  .pixel-status {
+    font-size: 9px; text-transform: uppercase; letter-spacing: 1px; margin-top: 2px;
+  }
+
+  /* Pixel modal overlay */
+  .pixel-modal-overlay {
+    position: fixed; top: 0; left: 0; right: 0; bottom: 0;
+    background: rgba(0,0,0,0.75); z-index: 150;
+    display: flex; align-items: center; justify-content: center;
+    opacity: 0; pointer-events: none; transition: opacity 0.2s;
+  }
+  .pixel-modal-overlay.visible { opacity: 1; pointer-events: all; }
+  .pixel-dialog {
+    background: #111; border: 1px solid #222; border-radius: 8px;
+    padding: 16px; width: 460px; max-width: 90vw; max-height: 80vh;
+    display: flex; flex-direction: column;
+  }
+  .pixel-dialog-header {
+    display: flex; align-items: center; gap: 10px; margin-bottom: 10px;
+    padding-bottom: 8px; border-bottom: 1px solid #1a1a1a;
+  }
+  .pixel-dialog-header .project-name { font-size: 14px; font-weight: 500; }
+  .pixel-dialog-header .screen-status { font-size: 9px; text-transform: uppercase; letter-spacing: 1px; margin-left: auto; }
+
+  /* Recent section collapse */
+  .recent-toggle {
+    cursor: pointer; display: flex; align-items: center; gap: 8px;
+    user-select: none;
+  }
+  .recent-toggle .arrow {
+    font-size: 10px; color: #444; transition: transform 0.2s;
+    display: inline-block;
+  }
+  .recent-toggle .arrow.collapsed { transform: rotate(-90deg); }
+  .recent-body-wrap { overflow: hidden; max-height: 600px; transition: max-height 0.3s ease; }
+  .recent-body-wrap.collapsed { max-height: 0 !important; overflow: hidden; }
+
+  /* Skip perms toggle */
+  .skip-perms-bar {
+    display: flex; align-items: center; gap: 8px;
+    margin-bottom: 8px; justify-content: flex-end;
+  }
+  .skip-perms-bar input[type="checkbox"] { accent-color: #cc7832; }
+  .skip-perms-bar label { font-size: 10px; color: #555; cursor: pointer; }
+
   .footer { text-align: center; padding: 20px; font-size: 10px; color: #222; }
 </style>
 </head>
@@ -408,27 +549,31 @@ const HTML = `<!DOCTYPE html>
     <div class="subtitle"><span class="live-dot"></span>active sessions <span class="live-badge">LIVE</span></div>
   </div>
 
+  <div class="view-toggle">
+    <button class="view-btn active" id="vbtn-terminal" onclick="setView('terminal')">terminals</button>
+    <button class="view-btn" id="vbtn-pixel" onclick="setView('pixel')">pixel</button>
+  </div>
+
   <div id="live-section">
     <div class="section-title">Running Now</div>
     <div class="grid" id="grid"></div>
   </div>
 
-  <div class="mode-toggle">
-    <button class="mode-btn active" id="btn-simple" onclick="setMode('simple')">simple</button>
-    <button class="mode-btn" id="btn-advanced" onclick="setMode('advanced')">advanced</button>
+  <div class="pixel-view" id="pixel-view">
+    <div class="section-title">Running Now</div>
+    <div class="pixel-floor" id="pixel-floor"></div>
   </div>
 
-  <div id="advanced-panel" style="display:none">
-    <div class="skip-perms">
-      <label class="toggle-switch">
-        <input type="checkbox" id="skip-perms-toggle">
-        <span class="toggle-slider"></span>
-      </label>
-      <label class="skip-perms-label" for="skip-perms-toggle">--dangerously-skip-permissions</label>
-      <span class="skip-perms-warn">bypasses all permission checks</span>
+  <div class="recent-section">
+    <div class="section-title recent-toggle" onclick="toggleRecent()">
+      <span class="arrow collapsed" id="recent-arrow">&#9660;</span>
+      Recent Sessions
     </div>
-    <div class="recent-section">
-      <div class="section-title">Recent Sessions</div>
+    <div class="recent-body-wrap collapsed" id="recent-wrap">
+      <div class="skip-perms-bar">
+        <input type="checkbox" id="skip-perms-toggle">
+        <label for="skip-perms-toggle">--dangerously-skip-permissions</label>
+      </div>
       <table class="recent-table">
         <thead><tr><th>Project</th><th>First Message</th><th>Last Active</th><th></th></tr></thead>
         <tbody id="recent-body"></tbody>
@@ -437,6 +582,50 @@ const HTML = `<!DOCTYPE html>
   </div>
 
   <div class="footer">auto-updates via server-sent events</div>
+</div>
+
+<div class="modal-overlay" id="new-modal" onclick="if(event.target===this)closeNewSession()">
+  <div class="modal">
+    <h2>New Claude Session</h2>
+    <div class="modal-field">
+      <label>Project directory</label>
+      <input class="modal-input" id="new-dir" value="${os.homedir()}/Documents/">
+      <div class="dir-browser" id="dir-browser"></div>
+      <div style="margin-top:6px;display:flex;gap:6px">
+        <input class="modal-input" id="new-folder-name" placeholder="new folder name" style="font-size:11px;padding:6px 8px">
+        <button class="btn btn-send" onclick="createFolder()" style="padding:6px 10px;font-size:9px">create</button>
+      </div>
+    </div>
+    <div class="modal-field">
+      <label>First message to Claude (optional - leave blank for empty session)</label>
+      <input class="modal-input" id="new-prompt" placeholder="e.g. fix the failing tests">
+    </div>
+    <div class="modal-check">
+      <input type="checkbox" id="new-skip-perms">
+      <label for="new-skip-perms">--dangerously-skip-permissions</label>
+    </div>
+    <div class="modal-actions">
+      <button class="btn btn-close" onclick="closeNewSession()">cancel</button>
+      <button class="btn btn-terminal" onclick="launchNewSession()">launch</button>
+    </div>
+  </div>
+</div>
+
+<div class="pixel-modal-overlay" id="pixel-modal" onclick="if(event.target===this)closePixelDialog()">
+  <div class="pixel-dialog">
+    <div class="pixel-dialog-header">
+      <div class="project-name" id="pxd-project"></div>
+      <span class="screen-status" id="pxd-status"></span>
+    </div>
+    <div class="msg-history" id="pxd-history" style="flex:1;max-height:350px"></div>
+    <div class="expanded-actions" style="margin-top:8px">
+      <input class="chat-input" id="pxd-input" placeholder="send a message..." onkeydown="if(event.key==='Enter')sendPixelMsg(event)">
+      <button class="btn btn-send" onclick="sendPixelMsg(event)">send</button>
+      <button class="btn btn-terminal" onclick="pixelOpenTerminal(event)">terminal</button>
+      <button class="btn btn-close" onclick="closePixelDialog()">close</button>
+      <span class="sent-flash" id="pxd-sent">sent!</span>
+    </div>
+  </div>
 </div>
 
 <div class="copy-toast" id="toast">Copied</div>
@@ -495,6 +684,7 @@ function renderLive(sessions) {
           </div>
           <div class="project-name">\${escapeHtml(s.projectName)}</div>
           <div class="project-path">\${escapeHtml(s.cwd)}</div>
+          \${s.messages?.length && s.messages[0].role === 'user' ? \`<div class="first-prompt">\${escapeHtml(s.messages[0].text.slice(0, 80))}</div>\` : ''}
           \${lastMsg ? \`<div class="last-msg-preview"><span class="msg-label \${lastMsg.role === 'assistant' ? 'claude' : 'you'}">\${lastMsg.role === 'assistant' ? 'Claude:' : 'You:'}</span> \${escapeHtml(lastMsg.text)}</div>\` : ''}
           <div class="expanded-content">
             <div class="msg-history" id="history-\${s.pid}">\${msgHtml}</div>
@@ -515,8 +705,23 @@ function renderLive(sessions) {
       </div>
       <div class="stand"></div>
       <div class="base"></div>
+      <button class="quick-terminal" onclick="openTerminal('\${s.tty}','\${s.pid}',event)">&gt;_ terminal</button>
     </div>
   \`}).join('');
+
+  // Add the "+" new session card
+  grid.innerHTML += \`
+    <div class="station new-session" onclick="showNewSession(event)">
+      <div class="monitor">
+        <div class="screen new-screen">
+          <div class="new-plus">+</div>
+          <div class="new-label">New Session</div>
+        </div>
+      </div>
+      <div class="stand"></div>
+      <div class="base"></div>
+    </div>
+  \`;
 
   // Scroll message history to bottom for expanded card
   if (expandedPid) {
@@ -533,8 +738,8 @@ function renderLive(sessions) {
 }
 
 function handleClick(pid, tty, event) {
-  // Don't expand if clicking inside expanded content
-  if (event.target.closest('.expanded-content') || event.target.closest('.btn')) return;
+  // Don't expand/collapse if clicking interactive elements
+  if (event.target.closest('.expanded-content') || event.target.closest('.btn') || event.target.closest('.quick-terminal') || event.target.closest('button') || event.target.closest('input')) return;
 
   if (expandedPid === pid) {
     // Already expanded, clicking header area - go to terminal
@@ -579,8 +784,9 @@ async function sendMsg(tty, pid, event) {
     if (data.ok) {
       input.value = '';
       const sent = document.getElementById('sent-' + pid);
+      sent.textContent = 'sent to terminal!';
       sent.classList.add('visible');
-      setTimeout(() => sent.classList.remove('visible'), 1500);
+      setTimeout(() => sent.classList.remove('visible'), 2500);
     } else {
       showToast('Failed to send: ' + (data.error || 'unknown'));
     }
@@ -595,17 +801,22 @@ async function openTerminal(tty, pid, event) {
 function renderRecent(sessions) {
   const tbody = document.getElementById('recent-body');
   if (!tbody) return;
-  tbody.innerHTML = sessions.map(s => \`
-    <tr class="recent-row">
-      <td class="recent-project">\${escapeHtml(s.projectName)}</td>
+  // Get live session project dirs to mark which recent ones are active
+  const liveDirs = new Set((lastData?.live || []).map(l => l.cwd));
+
+  tbody.innerHTML = sessions.map(s => {
+    const isLive = liveDirs.has(s.cwd);
+    return \`
+    <tr class="recent-row \${isLive ? 'recent-live' : ''}">
+      <td class="recent-project">\${isLive ? '<span style="color:#27c93f;margin-right:4px">\\u25cf</span>' : ''}\${escapeHtml(s.projectName)}</td>
       <td class="recent-message">\${escapeHtml(s.firstMessage)}</td>
       <td class="recent-time">\${s.lastModifiedStr}</td>
       <td><div class="btn-group">
-        <button class="resume-btn" onclick="copyResume('\${s.sessionId}',event)">copy</button>
-        <button class="launch-btn" onclick="launchResume('\${s.sessionId}','\${escapeHtml(s.cwd)}',event)">launch</button>
+        <button class="resume-btn" onclick="copyResume('\${s.sessionId}',event)" title="Copy claude --resume command to clipboard">copy cmd</button>
+        <button class="launch-btn" onclick="launchResume('\${s.sessionId}','\${escapeHtml(s.cwd)}',event)" title="Open in a new Terminal tab">resume</button>
       </div></td>
     </tr>
-  \`).join('');
+  \`}).join('');
 }
 
 function getResumeCmd(id) {
@@ -628,20 +839,550 @@ async function launchResume(id, cwd, e) {
   } catch { showToast('Launch failed'); }
 }
 
+function showNewSession(event) {
+  event.stopPropagation();
+  document.getElementById('new-modal').classList.add('visible');
+  const dirInput = document.getElementById('new-dir');
+  dirInput.focus();
+  dirInput.setSelectionRange(dirInput.value.length, dirInput.value.length);
+  browseDir(dirInput.value);
+}
+
+let cachedDir = '';
+let cachedEntries = [];
+
+async function browseDir(inputVal) {
+  // Split into parent dir and partial typed name
+  const lastSlash = inputVal.lastIndexOf('/');
+  const parentDir = inputVal.substring(0, lastSlash + 1);
+  const filter = inputVal.substring(lastSlash + 1).toLowerCase();
+
+  // Only re-fetch if parent dir changed
+  if (parentDir !== cachedDir) {
+    try {
+      const r = await fetch('/api/ls?dir=' + encodeURIComponent(parentDir));
+      const d = await r.json();
+      cachedDir = parentDir;
+      cachedEntries = d.ok ? d.entries : [];
+    } catch { cachedEntries = []; }
+  }
+
+  // Filter entries by what's typed after the last /
+  const filtered = filter
+    ? cachedEntries.filter(e => e.toLowerCase().startsWith(filter))
+    : cachedEntries;
+
+  const browser = document.getElementById('dir-browser');
+  if (!filtered.length) {
+    browser.innerHTML = '<div class="dir-entry dir-up" onclick="goUpDir()"><span class="dir-icon">..</span> up</div>'
+      + (filter ? '<div class="dir-entry" style="color:#333;cursor:default">no matches</div>' : '<div class="dir-entry" style="color:#333;cursor:default">no subdirectories</div>');
+    return;
+  }
+  browser.innerHTML = '<div class="dir-entry dir-up" onclick="goUpDir()"><span class="dir-icon">..</span> up</div>'
+    + filtered.map(e => \`<div class="dir-entry" onclick="selectDir('\${escapeHtml(parentDir + e)}')"><span class="dir-icon">+</span> \${escapeHtml(e)}</div>\`).join('');
+}
+
+function selectDir(dir) {
+  const input = document.getElementById('new-dir');
+  input.value = dir + '/';
+  input.focus();
+  browseDir(dir);
+}
+
+function goUpDir() {
+  const input = document.getElementById('new-dir');
+  let dir = input.value.replace(/\\/+$/, '');
+  const parent = dir.substring(0, dir.lastIndexOf('/'));
+  if (parent) {
+    input.value = parent + '/';
+    input.focus();
+    browseDir(parent);
+  }
+}
+
+async function createFolder() {
+  const dirInput = document.getElementById('new-dir');
+  const nameInput = document.getElementById('new-folder-name');
+  const name = nameInput.value.trim();
+  if (!name) { showToast('Enter a folder name'); return; }
+  let parent = dirInput.value.replace(/\\/+$/, '');
+  const newPath = parent + '/' + name;
+  try {
+    const r = await fetch('/api/mkdir', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({ path: newPath }) });
+    const d = await r.json();
+    if (d.ok) {
+      nameInput.value = '';
+      selectDir(newPath);
+      showToast('Created ' + name);
+    } else {
+      showToast('Failed: ' + (d.error || 'unknown'));
+    }
+  } catch { showToast('Failed to create folder'); }
+}
+
+// Browse as user types
+let browseTimeout;
+document.addEventListener('DOMContentLoaded', () => {
+  const dirInput = document.getElementById('new-dir');
+  dirInput.addEventListener('input', () => {
+    clearTimeout(browseTimeout);
+    browseTimeout = setTimeout(() => browseDir(dirInput.value), 300);
+  });
+});
+
+function closeNewSession() {
+  document.getElementById('new-modal').classList.remove('visible');
+  document.getElementById('new-dir').value = '';
+  document.getElementById('new-prompt').value = '';
+  document.getElementById('new-skip-perms').checked = false;
+}
+
+async function launchNewSession() {
+  const dir = document.getElementById('new-dir').value.trim();
+  if (!dir) { showToast('Enter a directory'); return; }
+  const prompt = document.getElementById('new-prompt').value.trim();
+  const skip = document.getElementById('new-skip-perms').checked;
+  try {
+    const r = await fetch('/api/new', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ dir, prompt, skipPerms: skip }),
+    });
+    const d = await r.json();
+    if (d.ok) {
+      closeNewSession();
+      showToast('Launched new Claude session');
+    } else {
+      showToast('Launch failed: ' + (d.error || 'unknown'));
+    }
+  } catch { showToast('Launch failed'); }
+}
+
 function showToast(msg) {
   const t = document.getElementById('toast');
   t.textContent = msg;
   t.classList.add('visible');
-  setTimeout(() => t.classList.remove('visible'), 2000);
+  setTimeout(() => t.classList.remove('visible'), 3000);
 }
 
-function setMode(mode) {
-  document.getElementById('advanced-panel').style.display = mode === 'advanced' ? 'block' : 'none';
-  document.getElementById('btn-advanced').classList.toggle('active', mode === 'advanced');
-  document.getElementById('btn-simple').classList.toggle('active', mode === 'simple');
-  localStorage.setItem('see-claude-mode', mode);
+
+// --- Recent section toggle ---
+function toggleRecent() {
+  const wrap = document.getElementById('recent-wrap');
+  const arrow = document.getElementById('recent-arrow');
+  wrap.classList.toggle('collapsed');
+  arrow.classList.toggle('collapsed');
 }
-if (localStorage.getItem('see-claude-mode') === 'advanced') setTimeout(() => setMode('advanced'), 0);
+
+// --- Pixel dialog ---
+let pixelDialogPid = null;
+let pixelDialogTty = null;
+
+function openPixelDialog(pid, tty) {
+  pixelDialogPid = pid;
+  pixelDialogTty = tty;
+  const session = lastData?.live?.find(s => s.pid === pid);
+  if (!session) return;
+
+  document.getElementById('pxd-project').textContent = session.projectName;
+  const statusEl = document.getElementById('pxd-status');
+  statusEl.textContent = getStatusLabel(session.status);
+  statusEl.style.color = getStatusColor(session.status);
+
+  const hist = document.getElementById('pxd-history');
+  hist.innerHTML = (session.messages || []).map(m => \`
+    <div class="msg-bubble \${m.role}">
+      <span class="msg-role">\${m.role === 'assistant' ? 'Claude' : 'You'}</span>
+      <div class="msg-text">\${escapeHtml(m.text)}</div>
+    </div>
+  \`).join('');
+  hist.scrollTop = hist.scrollHeight;
+
+  document.getElementById('pxd-input').value = '';
+  document.getElementById('pixel-modal').classList.add('visible');
+  setTimeout(() => document.getElementById('pxd-input').focus(), 100);
+}
+
+function closePixelDialog() {
+  document.getElementById('pixel-modal').classList.remove('visible');
+  pixelDialogPid = null;
+  pixelDialogTty = null;
+}
+
+async function sendPixelMsg(event) {
+  event.stopPropagation();
+  const input = document.getElementById('pxd-input');
+  const msg = input.value.trim();
+  if (!msg || !pixelDialogTty) return;
+  try {
+    const res = await fetch('/api/send', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ tty: pixelDialogTty, message: msg }),
+    });
+    const data = await res.json();
+    if (data.ok) {
+      input.value = '';
+      const sent = document.getElementById('pxd-sent');
+      sent.textContent = 'sent to terminal!';
+      sent.classList.add('visible');
+      setTimeout(() => sent.classList.remove('visible'), 2500);
+    } else {
+      showToast('Failed to send: ' + (data.error || 'unknown'));
+    }
+  } catch { showToast('Failed to send'); }
+}
+
+async function pixelOpenTerminal(event) {
+  event.stopPropagation();
+  if (!pixelDialogTty) return;
+  try { await fetch('/api/focus?tty=' + encodeURIComponent(pixelDialogTty) + '&pid=' + encodeURIComponent(pixelDialogPid)); } catch {}
+}
+
+// --- View toggle ---
+let currentView = localStorage.getItem('see-claude-view') || 'terminal';
+
+function setView(view) {
+  currentView = view;
+  localStorage.setItem('see-claude-view', view);
+  document.getElementById('live-section').style.display = view === 'terminal' ? 'block' : 'none';
+  document.getElementById('pixel-view').classList.toggle('active', view === 'pixel');
+  document.getElementById('vbtn-terminal').classList.toggle('active', view === 'terminal');
+  document.getElementById('vbtn-pixel').classList.toggle('active', view === 'pixel');
+  if (view === 'pixel' && lastData) renderPixel(lastData.live);
+}
+
+setTimeout(() => { if (currentView === 'pixel') setView('pixel'); }, 0);
+
+// --- Pixel art renderer ---
+const PX = 4; // pixel scale
+let pixelAnimFrame = 0;
+setInterval(() => { pixelAnimFrame++; }, 400);
+
+// Character variety - seeded from PID
+const HAIR_COLORS = ['#6b4226','#2a1a0a','#d4a44a','#c24a2a','#8a2a4a','#f5f5dc','#1a1a2e','#ff6b35'];
+const SKIN_COLORS = ['#f0c090','#d4a070','#8d5524','#c68642','#f1c27d','#e0ac69','#503335','#ffdbac'];
+const SHIRT_COLORS = ['#5b8dd9','#d95b5b','#5bd98a','#d9b95b','#9b5bd9','#d95bba','#5bd9d9','#ff6b35'];
+const PANTS_COLORS = ['#3b4a6b','#4a3b6b','#3b6b4a','#6b4a3b','#2d2d3d','#3d2d2d','#2d3d2d','#444'];
+const HAIR_STYLES = ['short','spiky','long','ponytail','mohawk','bun','curly','buzzcut'];
+const DESK_ITEMS = ['coffee','plant','cat','book','headphones','duck'];
+const CHAIR_COLORS = ['#444','#6b2222','#22446b','#226b44','#6b4422','#4a2266'];
+
+function hashPid(pid) {
+  let h = 0;
+  for (let i = 0; i < pid.length; i++) h = ((h << 5) - h + pid.charCodeAt(i)) | 0;
+  return Math.abs(h);
+}
+
+function getCharTraits(pid) {
+  const h = hashPid(pid);
+  return {
+    hair: HAIR_COLORS[h % HAIR_COLORS.length],
+    skin: SKIN_COLORS[(h >> 3) % SKIN_COLORS.length],
+    shirt: SHIRT_COLORS[(h >> 6) % SHIRT_COLORS.length],
+    pants: PANTS_COLORS[(h >> 9) % PANTS_COLORS.length],
+    hairStyle: HAIR_STYLES[(h >> 12) % HAIR_STYLES.length],
+    deskItem: DESK_ITEMS[(h >> 15) % DESK_ITEMS.length],
+    chairColor: CHAIR_COLORS[(h >> 18) % CHAIR_COLORS.length],
+  };
+}
+
+function drawPixelCharacter(canvas, status, frame, pid) {
+  const ctx = canvas.getContext('2d');
+  const w = canvas.width;
+  const h = canvas.height;
+  ctx.imageSmoothingEnabled = false;
+  ctx.clearRect(0, 0, w, h);
+
+  const p = PX;
+  const cx = Math.floor(w / 2);
+  const t = getCharTraits(pid || '0');
+
+  const screenGlow = status === 'working' ? '#27c93f' : status === 'thinking' ? '#ffbd2e' : '#334';
+  const desk = '#8b6914';
+  const deskDark = '#6b4f10';
+
+  // === DESK ===
+  ctx.fillStyle = desk;
+  ctx.fillRect(cx - 22*p, 26*p, 44*p, 3*p);
+  ctx.fillStyle = deskDark;
+  ctx.fillRect(cx - 22*p, 29*p, 44*p, p);
+  ctx.fillRect(cx - 20*p, 30*p, 2*p, 8*p);
+  ctx.fillRect(cx + 18*p, 30*p, 2*p, 8*p);
+
+  // === MONITOR ===
+  ctx.fillStyle = '#222';
+  ctx.fillRect(cx - 8*p, 16*p, 16*p, 10*p);
+  ctx.fillStyle = '#1a1a2e';
+  ctx.fillRect(cx - 7*p, 17*p, 14*p, 8*p);
+  ctx.fillStyle = screenGlow;
+  ctx.fillRect(cx - 6*p, 18*p, 12*p, 6*p);
+
+  // Screen lines
+  ctx.fillStyle = status === 'working' ? '#4ae84a' : status === 'thinking' ? '#ffe066' : '#445';
+  const lo = frame % 3;
+  for (let i = 0; i < 3; i++) {
+    ctx.fillRect(cx - 5*p, (19 + i*2)*p, ((i + lo) % 3 === 0 ? 8 : (i + lo) % 3 === 1 ? 6 : 10)*p, p);
+  }
+
+  // Monitor stand
+  ctx.fillStyle = '#333';
+  ctx.fillRect(cx - 2*p, 26*p, 4*p, p);
+  ctx.fillRect(cx - p, 25*p, 2*p, p);
+
+  // === CHAIR ===
+  ctx.fillStyle = t.chairColor;
+  ctx.fillRect(cx + 14*p, 22*p, 6*p, 2*p);
+  ctx.fillRect(cx + 18*p, 16*p, 2*p, 6*p);
+  ctx.fillRect(cx + 15*p, 24*p, p, 6*p);
+  ctx.fillRect(cx + 19*p, 24*p, p, 6*p);
+  ctx.fillStyle = '#333';
+  ctx.fillRect(cx + 14*p, 30*p, 2*p, p);
+  ctx.fillRect(cx + 19*p, 30*p, 2*p, p);
+
+  // === CHARACTER ===
+  const charX = cx + 12*p;
+  const charY = 8*p;
+  const bobY = status === 'working' ? (frame % 2 === 0 ? 0 : -p) : 0;
+
+  // Head
+  ctx.fillStyle = t.skin;
+  ctx.fillRect(charX, charY + bobY, 4*p, 4*p);
+
+  // Hair by style
+  ctx.fillStyle = t.hair;
+  if (t.hairStyle === 'short') {
+    ctx.fillRect(charX - p, charY + bobY - p, 6*p, 2*p);
+    ctx.fillRect(charX - p, charY + bobY, p, 2*p);
+  } else if (t.hairStyle === 'spiky') {
+    ctx.fillRect(charX - p, charY + bobY - p, 6*p, p);
+    ctx.fillRect(charX, charY + bobY - 2*p, p, p);
+    ctx.fillRect(charX + 2*p, charY + bobY - 2*p, p, p);
+    ctx.fillRect(charX + 4*p, charY + bobY - 2*p, p, p);
+    ctx.fillRect(charX - p, charY + bobY, p, p);
+  } else if (t.hairStyle === 'long') {
+    ctx.fillRect(charX - p, charY + bobY - p, 6*p, 2*p);
+    ctx.fillRect(charX - 2*p, charY + bobY, p, 5*p);
+    ctx.fillRect(charX + 4*p, charY + bobY, p, 5*p);
+  } else if (t.hairStyle === 'ponytail') {
+    ctx.fillRect(charX - p, charY + bobY - p, 6*p, 2*p);
+    ctx.fillRect(charX + 4*p, charY + bobY + p, p, p);
+    ctx.fillRect(charX + 5*p, charY + bobY + 2*p, p, 3*p);
+  } else if (t.hairStyle === 'mohawk') {
+    ctx.fillRect(charX + p, charY + bobY - 3*p, 2*p, 3*p);
+    ctx.fillRect(charX, charY + bobY - p, 4*p, p);
+  } else if (t.hairStyle === 'bun') {
+    ctx.fillRect(charX - p, charY + bobY - p, 6*p, 2*p);
+    ctx.fillRect(charX + p, charY + bobY - 3*p, 2*p, 2*p);
+  } else if (t.hairStyle === 'curly') {
+    ctx.fillRect(charX - 2*p, charY + bobY - p, 7*p, 2*p);
+    ctx.fillRect(charX - 2*p, charY + bobY, p, 3*p);
+    ctx.fillRect(charX + 4*p, charY + bobY, p, 3*p);
+    ctx.fillRect(charX - 2*p, charY + bobY + 3*p, p, p);
+  } else { // buzzcut
+    ctx.fillRect(charX, charY + bobY - p, 4*p, p);
+  }
+
+  // Eyes
+  ctx.fillStyle = '#222';
+  if (status === 'idle') {
+    ctx.fillRect(charX + p, charY + bobY + p, p, p);
+    ctx.fillRect(charX + 2*p, charY + bobY + p, p, p);
+  } else {
+    ctx.fillRect(charX, charY + bobY + p, p, p);
+    ctx.fillRect(charX + 2*p, charY + bobY + p, p, p);
+  }
+
+  // Mouth
+  ctx.fillStyle = '#222';
+  if (status === 'working') {
+    ctx.fillRect(charX + p, charY + bobY + 3*p, p, p); // focused
+  }
+
+  // Body
+  ctx.fillStyle = t.shirt;
+  ctx.fillRect(charX - p, charY + bobY + 4*p, 6*p, 5*p);
+
+  // Arms
+  if (status === 'working') {
+    const armOff = frame % 2 === 0 ? 0 : -p;
+    ctx.fillStyle = t.shirt;
+    ctx.fillRect(charX - 3*p, charY + bobY + 5*p, 2*p, 4*p);
+    ctx.fillRect(charX + 5*p, charY + bobY + 5*p, 2*p, 4*p);
+    ctx.fillStyle = t.skin;
+    ctx.fillRect(charX - 3*p + armOff, charY + bobY + 9*p, 2*p, p);
+    ctx.fillRect(charX + 5*p - armOff, charY + bobY + 9*p, 2*p, p);
+  } else if (status === 'thinking') {
+    ctx.fillStyle = t.shirt;
+    ctx.fillRect(charX - 3*p, charY + bobY + 5*p, 2*p, 3*p);
+    ctx.fillRect(charX + 5*p, charY + bobY + 5*p, 2*p, 4*p);
+    ctx.fillStyle = t.skin;
+    ctx.fillRect(charX - 2*p, charY + bobY + 3*p, 2*p, p);
+    ctx.fillRect(charX + 5*p, charY + bobY + 9*p, 2*p, p);
+  } else {
+    ctx.fillStyle = t.shirt;
+    ctx.fillRect(charX - 2*p, charY + bobY + 5*p, 2*p, 4*p);
+    ctx.fillRect(charX + 4*p, charY + bobY + 5*p, 2*p, 4*p);
+    ctx.fillStyle = t.skin;
+    ctx.fillRect(charX - 2*p, charY + bobY + 9*p, 2*p, p);
+    ctx.fillRect(charX + 4*p, charY + bobY + 9*p, 2*p, p);
+  }
+
+  // Pants
+  ctx.fillStyle = t.pants;
+  ctx.fillRect(charX - p, charY + bobY + 9*p, 6*p, 3*p);
+  ctx.fillRect(charX - 2*p, charY + bobY + 12*p, 3*p, p);
+  ctx.fillRect(charX + 3*p, charY + bobY + 12*p, 3*p, p);
+
+  // === THOUGHT BUBBLE ===
+  if (status === 'thinking') {
+    const bx = charX - 12*p;
+    const by = charY + bobY - 4*p;
+    ctx.fillStyle = '#fff';
+    ctx.fillRect(bx, by, 8*p, 4*p);
+    ctx.fillRect(bx + p, by - p, 6*p, p);
+    ctx.fillRect(bx + p, by + 4*p, 6*p, p);
+    ctx.fillStyle = '#666';
+    const dotAnim = frame % 4;
+    for (let i = 0; i < 3; i++) {
+      ctx.fillStyle = i <= dotAnim ? '#444' : '#ccc';
+      ctx.fillRect(bx + (1 + i*2)*p, by + p, p, p);
+    }
+    ctx.fillStyle = '#fff';
+    ctx.fillRect(charX - 3*p, charY + bobY - p, 2*p, p);
+    ctx.fillRect(charX - 5*p, charY + bobY - 2*p, p, p);
+  }
+
+  // === KEYBOARD ===
+  ctx.fillStyle = '#2a2a2a';
+  ctx.fillRect(cx - 4*p, 25*p, 8*p, 2*p);
+  ctx.fillStyle = '#3a3a3a';
+  for (let i = 0; i < 3; i++) ctx.fillRect(cx - 3*p + i*3*p, 25*p, 2*p, p);
+
+  // === DESK ITEM (varies per character) ===
+  const ix = cx - 17*p;
+  const iy = 23*p;
+
+  if (t.deskItem === 'coffee') {
+    ctx.fillStyle = '#ddd';
+    ctx.fillRect(ix, iy + p, 3*p, 3*p);
+    ctx.fillRect(ix + 3*p, iy + 2*p, p, p);
+    if (status !== 'idle' && frame % 3 < 2) {
+      ctx.fillStyle = 'rgba(255,255,255,0.3)';
+      ctx.fillRect(ix + p, iy - p + (frame % 2)*p, p, p);
+      ctx.fillRect(ix + 2*p, iy - 2*p + (frame % 2)*p, p, p);
+    }
+  } else if (t.deskItem === 'plant') {
+    ctx.fillStyle = '#8b4513';
+    ctx.fillRect(ix, iy + 2*p, 3*p, 2*p);
+    ctx.fillStyle = '#27a33f';
+    ctx.fillRect(ix + p, iy, p, 2*p);
+    ctx.fillRect(ix, iy - p, p, 2*p);
+    ctx.fillRect(ix + 2*p, iy - p, p, 2*p);
+  } else if (t.deskItem === 'cat') {
+    ctx.fillStyle = '#ff9944';
+    ctx.fillRect(ix, iy + p, 3*p, 2*p); // body
+    ctx.fillRect(ix + 3*p, iy, 2*p, 2*p); // head
+    ctx.fillRect(ix + 3*p, iy - p, p, p); // ear
+    ctx.fillRect(ix + 4*p, iy - p, p, p); // ear
+    ctx.fillStyle = '#222';
+    ctx.fillRect(ix + 3*p, iy + p, p, p); // eye
+    // tail wag
+    ctx.fillStyle = '#ff9944';
+    ctx.fillRect(ix - p, iy + (frame % 2)*p, p, 2*p);
+  } else if (t.deskItem === 'book') {
+    ctx.fillStyle = '#cc3333';
+    ctx.fillRect(ix, iy + p, 3*p, 3*p);
+    ctx.fillStyle = '#fff';
+    ctx.fillRect(ix + p, iy + 2*p, p, p);
+  } else if (t.deskItem === 'headphones') {
+    ctx.fillStyle = '#333';
+    ctx.fillRect(ix, iy + 2*p, p, 2*p);
+    ctx.fillRect(ix + 3*p, iy + 2*p, p, 2*p);
+    ctx.fillRect(ix, iy + p, 4*p, p);
+    ctx.fillStyle = '#666';
+    ctx.fillRect(ix - p, iy + 2*p, 2*p, p);
+    ctx.fillRect(ix + 3*p, iy + 2*p, 2*p, p);
+  } else if (t.deskItem === 'duck') {
+    ctx.fillStyle = '#ffd700';
+    ctx.fillRect(ix, iy + p, 3*p, 2*p); // body
+    ctx.fillRect(ix + 2*p, iy, 2*p, 2*p); // head
+    ctx.fillStyle = '#ff8c00';
+    ctx.fillRect(ix + 4*p, iy + p, p, p); // beak
+  }
+}
+
+function renderPixel(sessions) {
+  const floor = document.getElementById('pixel-floor');
+  if (!floor) return;
+
+  floor.innerHTML = sessions.map(s => \`
+    <div class="pixel-station" onclick="openPixelDialog('\${s.pid}', '\${s.tty}')">
+      <canvas id="pxc-\${s.pid}" width="200" height="160" style="image-rendering:pixelated"></canvas>
+      <div class="pixel-label">\${escapeHtml(s.projectName)}</div>
+      <div class="pixel-status" style="color:\${getStatusColor(s.status)}">\${getStatusLabel(s.status)}</div>
+      <button class="quick-terminal" onclick="event.stopPropagation();openTerminal('\${s.tty}','\${s.pid}',event)" style="margin-top:4px">&gt;_ terminal</button>
+    </div>
+  \`).join('');
+
+  // Add + button
+  floor.innerHTML += \`
+    <div class="pixel-station" onclick="showNewSession(event)" style="opacity:0.4">
+      <canvas id="pxc-new" width="200" height="160" style="image-rendering:pixelated"></canvas>
+      <div class="pixel-label" style="color:#555">+ New Session</div>
+    </div>
+  \`;
+  // Draw empty desk for + card
+  drawEmptyDesk(document.getElementById('pxc-new'));
+
+  // Draw each character
+  sessions.forEach(s => {
+    const canvas = document.getElementById('pxc-' + s.pid);
+    if (canvas) drawPixelCharacter(canvas, s.status, pixelAnimFrame, s.pid);
+  });
+}
+
+function drawEmptyDesk(canvas) {
+  if (!canvas) return;
+  const ctx = canvas.getContext('2d');
+  ctx.imageSmoothingEnabled = false;
+  const p = PX;
+  const cx = Math.floor(canvas.width / 2);
+  // Empty desk
+  ctx.fillStyle = '#8b6914';
+  ctx.fillRect(cx - 22*p, 26*p, 44*p, 3*p);
+  ctx.fillStyle = '#6b4f10';
+  ctx.fillRect(cx - 22*p, 29*p, 44*p, p);
+  ctx.fillRect(cx - 20*p, 30*p, 2*p, 8*p);
+  ctx.fillRect(cx + 18*p, 30*p, 2*p, 8*p);
+  // Empty chair
+  ctx.fillStyle = '#333';
+  ctx.fillRect(cx + 14*p, 22*p, 6*p, 2*p);
+  ctx.fillRect(cx + 18*p, 16*p, 2*p, 6*p);
+  ctx.fillRect(cx + 15*p, 24*p, p, 6*p);
+  ctx.fillRect(cx + 19*p, 24*p, p, 6*p);
+  // Monitor off
+  ctx.fillStyle = '#1a1a1a';
+  ctx.fillRect(cx - 8*p, 16*p, 16*p, 10*p);
+  ctx.fillStyle = '#111';
+  ctx.fillRect(cx - 7*p, 17*p, 14*p, 8*p);
+  ctx.fillStyle = '#333';
+  ctx.fillRect(cx - 2*p, 26*p, 4*p, p);
+  // Big +
+  ctx.fillStyle = '#555';
+  ctx.fillRect(cx - p, 6*p, 2*p, 10*p);
+  ctx.fillRect(cx - 5*p, 10*p, 10*p, 2*p);
+}
+
+// Animate pixel view
+setInterval(() => {
+  if (currentView === 'pixel' && lastData) {
+    lastData.live.forEach(s => {
+      const canvas = document.getElementById('pxc-' + s.pid);
+      if (canvas) drawPixelCharacter(canvas, s.status, pixelAnimFrame, s.pid);
+    });
+  }
+}, 400);
 
 // --- SSE ---
 let lastData = null;
@@ -653,8 +1394,29 @@ function connectSSE() {
       lastData = JSON.parse(e.data);
       // Don't re-render if user is interacting with expanded card
       const inputFocused = expandedPid && document.activeElement?.id === 'input-' + expandedPid;
-      if (!inputFocused) {
-        renderLive(lastData.live);
+      const pixelInputFocused = pixelDialogPid && document.activeElement?.id === 'pxd-input';
+      if (!inputFocused && !pixelInputFocused) {
+        if (currentView === 'terminal') renderLive(lastData.live);
+        else renderPixel(lastData.live);
+      }
+      // Update pixel dialog messages if open
+      if (pixelDialogPid && !pixelInputFocused) {
+        const session = lastData.live.find(s => s.pid === pixelDialogPid);
+        if (session) {
+          const statusEl = document.getElementById('pxd-status');
+          statusEl.textContent = getStatusLabel(session.status);
+          statusEl.style.color = getStatusColor(session.status);
+          const hist = document.getElementById('pxd-history');
+          hist.innerHTML = (session.messages || []).map(m => \`
+            <div class="msg-bubble \${m.role}">
+              <span class="msg-role">\${m.role === 'assistant' ? 'Claude' : 'You'}</span>
+              <div class="msg-text">\${escapeHtml(m.text)}</div>
+            </div>
+          \`).join('');
+          hist.scrollTop = hist.scrollHeight;
+        } else {
+          closePixelDialog(); // session ended
+        }
       }
       renderRecent(lastData.recent);
     } catch {}
@@ -664,7 +1426,8 @@ function connectSSE() {
 
 fetch('/api/sessions').then(r => r.json()).then(data => {
   lastData = data;
-  renderLive(data.live);
+  if (currentView === 'terminal') renderLive(data.live);
+  else renderPixel(data.live);
   renderRecent(data.recent);
   connectSSE();
 }).catch(connectSSE);
@@ -687,6 +1450,58 @@ const server = http.createServer((req, res) => {
     const data = JSON.stringify({ live: getClaudeSessions(), recent: getRecentSessions() });
     res.write(`data: ${data}\n\n`);
     req.on('close', () => sseClients.delete(res));
+
+  } else if (url.pathname === '/api/ls') {
+    const dir = url.searchParams.get('dir') || os.homedir();
+    try {
+      const entries = fs.readdirSync(dir, { withFileTypes: true })
+        .filter(e => e.isDirectory() && !e.name.startsWith('.'))
+        .map(e => e.name)
+        .sort();
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ ok: true, dir, entries }));
+    } catch (e) {
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ ok: false, dir, entries: [], error: String(e) }));
+    }
+    return;
+
+  } else if (url.pathname === '/api/mkdir' && req.method === 'POST') {
+    let body = '';
+    req.on('data', chunk => body += chunk);
+    req.on('end', () => {
+      try {
+        const { path: dirPath } = JSON.parse(body);
+        fs.mkdirSync(dirPath, { recursive: true });
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ ok: true }));
+      } catch (e) {
+        res.writeHead(500, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ ok: false, error: String(e) }));
+      }
+    });
+    return;
+
+  } else if (url.pathname === '/api/new' && req.method === 'POST') {
+    let body = '';
+    req.on('data', chunk => body += chunk);
+    req.on('end', () => {
+      try {
+        const { dir, prompt, skipPerms } = JSON.parse(body);
+        let cmd = 'claude';
+        if (skipPerms) cmd += ' --dangerously-skip-permissions';
+        if (prompt) cmd += ` "${prompt.replace(/\\/g, '\\\\').replace(/"/g, '\\"')}"`;
+        const dirPath = dir.replace(/"/g, '\\"');
+        const script = `tell application "Terminal"\nactivate\ndo script "cd \\"${dirPath}\\" && ${cmd}"\nend tell`;
+        execSync(`osascript -e '${script.replace(/'/g, "'\"'\"'")}'`, { encoding: 'utf8' });
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ ok: true }));
+      } catch (e) {
+        res.writeHead(500, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ ok: false, error: String(e) }));
+      }
+    });
+    return;
 
   } else if (url.pathname === '/api/send' && req.method === 'POST') {
     let body = '';
