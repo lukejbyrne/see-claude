@@ -204,7 +204,15 @@ const HTML = `<!DOCTYPE html>
   .section-title {
     font-size: 11px; font-weight: 300; color: #444; letter-spacing: 3px;
     text-transform: uppercase; margin-bottom: 16px; padding-bottom: 8px; border-bottom: 1px solid #1a1a1a;
+    display: flex; align-items: center; justify-content: space-between;
   }
+  .new-session-btn {
+    font-family: 'JetBrains Mono', monospace; font-size: 10px;
+    background: transparent; border: 1px dashed #333; color: #555;
+    padding: 4px 12px; border-radius: 4px; cursor: pointer;
+    transition: all 0.2s; letter-spacing: 1px;
+  }
+  .new-session-btn:hover { border-color: #cc7832; color: #cc7832; }
 
   #live-section { width: 100%; }
 
@@ -555,12 +563,12 @@ const HTML = `<!DOCTYPE html>
   </div>
 
   <div id="live-section">
-    <div class="section-title">Running Now</div>
+    <div class="section-title"><span>Running Now</span><button class="new-session-btn" onclick="showNewSession(event)">+ NEW SESSION</button></div>
     <div class="grid" id="grid"></div>
   </div>
 
   <div class="pixel-view" id="pixel-view">
-    <div class="section-title">Running Now</div>
+    <div class="section-title"><span>Running Now</span><button class="new-session-btn" onclick="showNewSession(event)">+ NEW SESSION</button></div>
     <div class="pixel-floor" id="pixel-floor"></div>
   </div>
 
@@ -708,20 +716,6 @@ function renderLive(sessions) {
       <button class="quick-terminal" onclick="openTerminal('\${s.tty}','\${s.pid}',event)">&gt;_ terminal</button>
     </div>
   \`}).join('');
-
-  // Add the "+" new session card
-  grid.innerHTML += \`
-    <div class="station new-session" onclick="showNewSession(event)">
-      <div class="monitor">
-        <div class="screen new-screen">
-          <div class="new-plus">+</div>
-          <div class="new-label">New Session</div>
-        </div>
-      </div>
-      <div class="stand"></div>
-      <div class="base"></div>
-    </div>
-  \`;
 
   // Scroll message history to bottom for expanded card
   if (expandedPid) {
@@ -1325,53 +1319,11 @@ function renderPixel(sessions) {
     </div>
   \`).join('');
 
-  // Add + button
-  floor.innerHTML += \`
-    <div class="pixel-station" onclick="showNewSession(event)" style="opacity:0.4">
-      <canvas id="pxc-new" width="200" height="160" style="image-rendering:pixelated"></canvas>
-      <div class="pixel-label" style="color:#555">+ New Session</div>
-    </div>
-  \`;
-  // Draw empty desk for + card
-  drawEmptyDesk(document.getElementById('pxc-new'));
-
   // Draw each character
   sessions.forEach(s => {
     const canvas = document.getElementById('pxc-' + s.pid);
     if (canvas) drawPixelCharacter(canvas, s.status, pixelAnimFrame, s.pid);
   });
-}
-
-function drawEmptyDesk(canvas) {
-  if (!canvas) return;
-  const ctx = canvas.getContext('2d');
-  ctx.imageSmoothingEnabled = false;
-  const p = PX;
-  const cx = Math.floor(canvas.width / 2);
-  // Empty desk
-  ctx.fillStyle = '#8b6914';
-  ctx.fillRect(cx - 22*p, 26*p, 44*p, 3*p);
-  ctx.fillStyle = '#6b4f10';
-  ctx.fillRect(cx - 22*p, 29*p, 44*p, p);
-  ctx.fillRect(cx - 20*p, 30*p, 2*p, 8*p);
-  ctx.fillRect(cx + 18*p, 30*p, 2*p, 8*p);
-  // Empty chair
-  ctx.fillStyle = '#333';
-  ctx.fillRect(cx + 14*p, 22*p, 6*p, 2*p);
-  ctx.fillRect(cx + 18*p, 16*p, 2*p, 6*p);
-  ctx.fillRect(cx + 15*p, 24*p, p, 6*p);
-  ctx.fillRect(cx + 19*p, 24*p, p, 6*p);
-  // Monitor off
-  ctx.fillStyle = '#1a1a1a';
-  ctx.fillRect(cx - 8*p, 16*p, 16*p, 10*p);
-  ctx.fillStyle = '#111';
-  ctx.fillRect(cx - 7*p, 17*p, 14*p, 8*p);
-  ctx.fillStyle = '#333';
-  ctx.fillRect(cx - 2*p, 26*p, 4*p, p);
-  // Big +
-  ctx.fillStyle = '#555';
-  ctx.fillRect(cx - p, 6*p, 2*p, 10*p);
-  ctx.fillRect(cx - 5*p, 10*p, 10*p, 2*p);
 }
 
 // Animate pixel view
