@@ -1309,6 +1309,7 @@ function drawPixelCharacter(canvas, status, frame, pid) {
 function renderPixel(sessions) {
   const floor = document.getElementById('pixel-floor');
   if (!floor) return;
+  document.getElementById('count').textContent = sessions.length;
 
   floor.innerHTML = sessions.map(s => \`
     <div class="pixel-station" onclick="openPixelDialog('\${s.pid}', '\${s.tty}')">
