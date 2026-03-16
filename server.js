@@ -22,8 +22,8 @@ function getClaudeSessions() {
         const [pidStr, tty, cpu, mem, elapsed, state] = info.split(/\s+/);
 
         let cwd = '';
-        try { cwd = execSync(`lsof -p ${pid} -Fn 2>/dev/null | grep '^n/' | head -1`, { encoding: 'utf8' }).trim().replace(/^n/, ''); } catch {}
-        if (!cwd) try { cwd = execSync(`lsof -p ${pid} 2>/dev/null | grep cwd | awk '{print $NF}'`, { encoding: 'utf8' }).trim(); } catch {}
+        try { cwd = execSync(`lsof -p ${pid} 2>/dev/null | grep cwd | awk '{print $NF}'`, { encoding: 'utf8' }).trim(); } catch {}
+        if (!cwd) try { cwd = execSync(`lsof -p ${pid} -Fn 2>/dev/null | grep '^n/' | head -1`, { encoding: 'utf8' }).trim().replace(/^n/, ''); } catch {}
 
         // Get recent messages from session file
         const messages = getSessionMessages(cwd, 20);
