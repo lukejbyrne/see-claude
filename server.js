@@ -28,18 +28,17 @@ function getClaudeSessions() {
         // Get recent messages from session file
         const messages = getSessionMessages(cwd, 20);
 
-        // Determine status from session file, not CPU
+        // Determine status from session file + CPU
         let status = 'idle';
+        const cpuNum = parseFloat(cpu);
         if (messages.length) {
           const last = messages[messages.length - 1];
           if (last.role === 'user') status = 'working'; // waiting for Claude to respond
           else if (last.hasToolUse) status = 'thinking'; // Claude is using tools
         }
-        // Fallback to CPU for sessions without message history
-        if (status === 'idle' && !messages.length) {
-          const cpuNum = parseFloat(cpu);
-          if (cpuNum > 15) status = 'working';
-        }
+        // If file says idle but CPU is high, Claude is actively working
+        // (mid-response, or file hasn't been flushed yet)
+        if (status === 'idle' && cpuNum > 10) status = 'working';
 
         return {
           pid: pidStr, tty, cpu: `${cpu}%`, mem: `${mem}%`, elapsed, cwd,
@@ -81,18 +80,23 @@ function getSessionMessages(cwd, count = 20) {
         if (role !== 'user' && role !== 'assistant') continue;
         const content = d.message.content;
         let text = '';
+        let hasToolUse = false;
+        let hasToolResult = false;
         if (typeof content === 'string') text = content;
         else if (Array.isArray(content)) {
           for (const c of content) {
-            if (c.type === 'text' && c.text?.trim()) { text = c.text.trim(); break; }
+            if (c.type === 'text' && c.text?.trim() && !text) text = c.text.trim();
+            if (c.type === 'tool_use') hasToolUse = true;
+            if (c.type === 'tool_result') hasToolResult = true;
           }
         }
-        // Check if assistant message contains tool_use
-        let hasToolUse = false;
-        if (role === 'assistant' && Array.isArray(content)) {
-          hasToolUse = content.some(c => c.type === 'tool_use');
+        // Always track the message for status, even without display text
+        if (text) {
+          msgs.push({ role, text: text.slice(0, 300), hasToolUse, hasToolResult });
+        } else if (hasToolUse || hasToolResult) {
+          // Tool messages without visible text - still track for status
+          msgs.push({ role, text: hasToolUse ? '(using tools...)' : '(tool result)', hasToolUse, hasToolResult });
         }
-        if (text) msgs.push({ role, text: text.slice(0, 300), hasToolUse });
       } catch {}
     }
     return msgs.slice(-count);
@@ -547,9 +551,52 @@ const HTML = `<!DOCTYPE html>
   /* Pixel art view */
   .pixel-view { display: none; width: 100%; }
   .pixel-view.active { display: block; }
+  .pixel-office {
+    position: relative;
+    background: linear-gradient(180deg, #1a1a2e 0%, #16213e 40%, #1a1a2a 40.1%, #151520 100%);
+    border-radius: 8px; overflow: hidden; padding: 0;
+    min-height: 200px;
+  }
+  .office-wall {
+    position: absolute; top: 0; left: 0; right: 0; height: 40%;
+    pointer-events: none; z-index: 0;
+  }
+  .office-window {
+    position: absolute; top: 12%; left: 50%; transform: translateX(-50%);
+    border: 3px solid #333; border-radius: 2px; overflow: hidden;
+    width: 120px; height: 60px; z-index: 1;
+  }
+  .office-window-sky {
+    width: 100%; height: 100%;
+    transition: background 2s;
+  }
+  .office-window-frame {
+    position: absolute; top: 0; left: 50%; width: 3px; height: 100%;
+    background: #333; transform: translateX(-50%);
+  }
+  .office-window-frame-h {
+    position: absolute; top: 50%; left: 0; width: 100%; height: 3px;
+    background: #333; transform: translateY(-50%);
+  }
+  .office-floor-line {
+    position: absolute; top: 40%; left: 0; right: 0; height: 2px;
+    background: #2a2a3a; z-index: 0;
+  }
   .pixel-floor {
     display: flex; flex-wrap: wrap; justify-content: center;
-    gap: 40px; padding: 20px;
+    gap: 40px; padding: 80px 20px 20px;
+    position: relative; z-index: 2;
+  }
+  .office-clock {
+    position: absolute; top: 8%; right: 15%; font-size: 10px;
+    color: #555; font-family: 'JetBrains Mono', monospace; z-index: 1;
+    background: #1a1a28; border: 1px solid #2a2a3a; padding: 2px 6px; border-radius: 2px;
+  }
+  .office-poster {
+    position: absolute; top: 10%; left: 12%; width: 40px; height: 50px;
+    background: #222; border: 2px solid #333; border-radius: 1px; z-index: 1;
+    display: flex; align-items: center; justify-content: center;
+    font-size: 16px; color: #cc7832;
   }
   .pixel-station {
     display: flex; flex-direction: column; align-items: center;
@@ -633,7 +680,18 @@ const HTML = `<!DOCTYPE html>
 
   <div class="pixel-view" id="pixel-view">
     <div class="section-title"><span>Running Now</span><button class="new-session-btn" onclick="showNewSession(event)">+ NEW SESSION</button></div>
-    <div class="pixel-floor" id="pixel-floor"></div>
+    <div class="pixel-office">
+      <div class="office-wall"></div>
+      <div class="office-poster">~</div>
+      <div class="office-window">
+        <div class="office-window-sky" id="office-sky"></div>
+        <div class="office-window-frame"></div>
+        <div class="office-window-frame-h"></div>
+      </div>
+      <div class="office-clock" id="office-clock"></div>
+      <div class="office-floor-line"></div>
+      <div class="pixel-floor" id="pixel-floor"></div>
+    </div>
   </div>
 
   <div class="recent-section">
@@ -1125,6 +1183,116 @@ function setView(view) {
 
 setTimeout(() => { if (currentView === 'pixel') setView('pixel'); }, 0);
 
+// --- Office environment ---
+function getSkyColor() {
+  const h = new Date().getHours();
+  if (h >= 6 && h < 8) return 'linear-gradient(180deg, #2d1b4e 0%, #e8846b 50%, #f4c27f 100%)'; // sunrise
+  if (h >= 8 && h < 12) return 'linear-gradient(180deg, #4a90d9 0%, #87ceeb 50%, #b8e0f0 100%)'; // morning
+  if (h >= 12 && h < 17) return 'linear-gradient(180deg, #2d7dd2 0%, #87ceeb 100%)'; // afternoon
+  if (h >= 17 && h < 20) return 'linear-gradient(180deg, #1a1a3e 0%, #d4556b 50%, #f4a742 100%)'; // sunset
+  if (h >= 20 && h < 22) return 'linear-gradient(180deg, #0a0a2e 0%, #1a1a4e 50%, #2d1b4e 100%)'; // dusk
+  return 'linear-gradient(180deg, #050510 0%, #0a0a2e 50%, #111133 100%)'; // night
+}
+
+function updateOffice() {
+  const sky = document.getElementById('office-sky');
+  const clock = document.getElementById('office-clock');
+  if (sky) sky.style.background = getSkyColor();
+  if (clock) {
+    const now = new Date();
+    clock.textContent = now.getHours().toString().padStart(2,'0') + ':' + now.getMinutes().toString().padStart(2,'0');
+  }
+}
+updateOffice();
+setInterval(updateOffice, 30000);
+
+// --- Desktop notifications ---
+let prevStatuses = {};
+
+function checkNotifications(sessions) {
+  if (Notification.permission !== 'granted') return;
+  sessions.forEach(s => {
+    const prev = prevStatuses[s.pid];
+    if (prev && (prev === 'working' || prev === 'thinking') && s.status === 'idle') {
+      new Notification('Claude finished', {
+        body: s.projectName + ' is now idle',
+        icon: 'data:image/svg+xml,<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100"><text y=".9em" font-size="90">🖥️</text></svg>',
+        silent: false,
+      });
+    }
+    prevStatuses[s.pid] = s.status;
+  });
+}
+
+// Request notification permission
+if ('Notification' in window && Notification.permission === 'default') {
+  // Show a subtle prompt
+  setTimeout(() => {
+    Notification.requestPermission();
+  }, 3000);
+}
+
+// --- Drag to reorder (pixel view) ---
+let rosterOrder = JSON.parse(localStorage.getItem('see-claude-roster-order') || '[]');
+
+function applyRosterOrder(items) {
+  if (!rosterOrder.length) return items;
+  const orderMap = {};
+  rosterOrder.forEach((key, i) => { orderMap[key] = i; });
+  return items.sort((a, b) => {
+    const keyA = a.type === 'live' ? a.session.cwd : a.project.cwd;
+    const keyB = b.type === 'live' ? b.session.cwd : b.project.cwd;
+    const oA = orderMap[keyA] !== undefined ? orderMap[keyA] : 9999;
+    const oB = orderMap[keyB] !== undefined ? orderMap[keyB] : 9999;
+    if (oA !== oB) return oA - oB;
+    // Live before offline if no saved order
+    if (a.type !== b.type) return a.type === 'live' ? -1 : 1;
+    return 0;
+  });
+}
+
+let dragSrcEl = null;
+
+function initDrag(floor) {
+  const stations = floor.querySelectorAll('.pixel-station');
+  stations.forEach(el => {
+    el.setAttribute('draggable', 'true');
+    el.addEventListener('dragstart', (e) => {
+      dragSrcEl = el;
+      el.style.opacity = '0.4';
+      e.dataTransfer.effectAllowed = 'move';
+    });
+    el.addEventListener('dragend', () => { el.style.opacity = ''; });
+    el.addEventListener('dragover', (e) => {
+      e.preventDefault(); e.dataTransfer.dropEffect = 'move';
+      // Show insert line on left or right side based on mouse position
+      const rect = el.getBoundingClientRect();
+      const mid = rect.left + rect.width / 2;
+      if (e.clientX < mid) {
+        el.style.borderLeft = '3px solid #cc7832'; el.style.borderRight = '';
+      } else {
+        el.style.borderRight = '3px solid #cc7832'; el.style.borderLeft = '';
+      }
+    });
+    el.addEventListener('dragleave', () => { el.style.borderLeft = ''; el.style.borderRight = ''; });
+    el.addEventListener('drop', (e) => {
+      e.preventDefault();
+      el.style.borderLeft = ''; el.style.borderRight = '';
+      if (dragSrcEl !== el) {
+        const parent = el.parentNode;
+        const rect = el.getBoundingClientRect();
+        const mid = rect.left + rect.width / 2;
+        if (e.clientX < mid) parent.insertBefore(dragSrcEl, el);
+        else parent.insertBefore(dragSrcEl, el.nextSibling);
+        // Save order
+        const newOrder = [...parent.querySelectorAll('.pixel-station')].map(s => s.dataset.cwd).filter(Boolean);
+        rosterOrder = newOrder;
+        localStorage.setItem('see-claude-roster-order', JSON.stringify(newOrder));
+      }
+    });
+  });
+}
+
 // --- Pixel art renderer ---
 const PX = 4; // pixel scale
 let pixelAnimFrame = 0;
@@ -1501,11 +1669,14 @@ function renderPixel(sessions) {
     }
   });
 
-  floor.innerHTML = items.map((item, i) => {
+  // Apply saved drag order
+  const ordered = applyRosterOrder(items);
+
+  floor.innerHTML = ordered.map((item, i) => {
     if (item.type === 'live') {
       const s = item.session;
       return \`
-        <div class="pixel-station" onclick="openPixelDialog('\${s.pid}', '\${s.tty}')">
+        <div class="pixel-station" data-cwd="\${escapeHtml(s.cwd)}" onclick="openPixelDialog('\${s.pid}', '\${s.tty}')">
           <canvas id="pxc-\${s.pid}" width="200" height="160" style="image-rendering:pixelated"></canvas>
           <div class="pixel-label">\${escapeHtml(s.projectName)}</div>
           <div class="pixel-status" style="color:\${getStatusColor(s.status)}">\${getStatusLabel(s.status)}</div>
@@ -1515,7 +1686,7 @@ function renderPixel(sessions) {
     } else {
       const r = item.project;
       return \`
-        <div class="pixel-station offline" onclick="wakeProject('\${escapeHtml(r.cwd)}', '\${escapeHtml(r.latestSession)}')">
+        <div class="pixel-station offline" data-cwd="\${escapeHtml(r.cwd)}" onclick="wakeProject('\${escapeHtml(r.cwd)}', '\${escapeHtml(r.latestSession)}')">
           <canvas id="pxr-\${r.dirKey}" width="200" height="160" style="image-rendering:pixelated"></canvas>
           <div class="pixel-label">\${escapeHtml(r.projectName)}</div>
           <div class="pixel-status" style="color:#444">offline</div>
@@ -1524,6 +1695,9 @@ function renderPixel(sessions) {
       \`;
     }
   }).join('');
+
+  // Enable drag to reorder
+  initDrag(floor);
 
   // Draw live characters
   sessions.forEach(s => {
@@ -1568,13 +1742,13 @@ function connectSSE() {
       lastData = JSON.parse(e.data);
       // Don't re-render if user is interacting with expanded card
       const inputFocused = expandedPid && document.activeElement?.id === 'input-' + expandedPid;
-      const pixelInputFocused = pixelDialogPid && document.activeElement?.id === 'pxd-input';
-      if (!inputFocused && !pixelInputFocused) {
+      const pixelDialogOpen = !!pixelDialogPid;
+      if (!inputFocused && !pixelDialogOpen) {
         if (currentView === 'terminal') renderLive(lastData.live);
         else renderPixel(lastData.live);
       }
       // Update pixel dialog messages if open
-      if (pixelDialogPid && !pixelInputFocused) {
+      if (pixelDialogOpen) {
         const session = lastData.live.find(s => s.pid === pixelDialogPid);
         if (session) {
           const statusEl = document.getElementById('pxd-status');
@@ -1593,6 +1767,7 @@ function connectSSE() {
         }
       }
       renderRecent(lastData.recent);
+      checkNotifications(lastData.live);
     } catch {}
   };
   src.onerror = () => { src.close(); setTimeout(connectSSE, 3000); };
@@ -1735,7 +1910,7 @@ const server = http.createServer((req, res) => {
         let cmd = `claude --resume ${sessionId}`;
         if (skipPerms) cmd += ' --dangerously-skip-permissions';
         const dirPath = cwd.startsWith('/') ? cwd : `/${cwd}`;
-        const script = `tell application "Terminal"\nactivate\ndo script "cd ${dirPath.replace(/"/g, '\\"')} && ${cmd}"\nend tell`;
+        const script = `tell application "Terminal"\ndo script "cd ${dirPath.replace(/"/g, '\\"')} && ${cmd}"\nend tell`;
         execSync(`osascript -e '${script.replace(/'/g, "'\"'\"'")}'`, { encoding: 'utf8' });
         res.writeHead(200, { 'Content-Type': 'application/json' });
         res.end(JSON.stringify({ ok: true }));
