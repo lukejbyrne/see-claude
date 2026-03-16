@@ -1100,7 +1100,7 @@ function openPixelDialog(pid, tty) {
   const session = lastData?.live?.find(s => s.pid === pid);
   if (!session) return;
 
-  document.getElementById('pxd-project').textContent = session.projectName;
+  document.getElementById('pxd-project').textContent = getDisplayName(session.cwd, session.projectName);
   const statusEl = document.getElementById('pxd-status');
   statusEl.textContent = getStatusLabel(session.status);
   statusEl.style.color = getStatusColor(session.status);
@@ -1230,6 +1230,42 @@ if ('Notification' in window && Notification.permission === 'default') {
   setTimeout(() => {
     Notification.requestPermission();
   }, 3000);
+}
+
+// --- Custom project names ---
+let customNames = JSON.parse(localStorage.getItem('see-claude-names') || '{}');
+
+function getDisplayName(cwd, fallback) {
+  return customNames[cwd] || fallback;
+}
+
+function renameProject(cwd, fallback, el) {
+  const current = customNames[cwd] || fallback;
+  const input = document.createElement('input');
+  input.className = 'chat-input';
+  input.value = customNames[cwd] || '';
+  input.placeholder = fallback;
+  input.style.cssText = 'width:100%;font-size:11px;padding:2px 6px;text-align:center;margin-top:8px';
+  el.replaceWith(input);
+  input.focus();
+  input.select();
+  const save = () => {
+    const val = input.value.trim();
+    if (val) customNames[cwd] = val;
+    else delete customNames[cwd];
+    localStorage.setItem('see-claude-names', JSON.stringify(customNames));
+    const label = document.createElement('div');
+    label.className = 'pixel-label';
+    label.textContent = val || fallback;
+    label.ondblclick = (e) => { e.stopPropagation(); renameProject(cwd, fallback, label); };
+    input.replaceWith(label);
+  };
+  input.addEventListener('blur', save);
+  input.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') { e.preventDefault(); input.blur(); }
+    if (e.key === 'Escape') { input.value = ''; input.blur(); }
+  });
+  input.addEventListener('click', (e) => e.stopPropagation());
 }
 
 // --- Drag to reorder (pixel view) ---
@@ -1678,7 +1714,7 @@ function renderPixel(sessions) {
       return \`
         <div class="pixel-station" data-cwd="\${escapeHtml(s.cwd)}" onclick="openPixelDialog('\${s.pid}', '\${s.tty}')">
           <canvas id="pxc-\${s.pid}" width="200" height="160" style="image-rendering:pixelated"></canvas>
-          <div class="pixel-label">\${escapeHtml(s.projectName)}</div>
+          <div class="pixel-label" ondblclick="event.stopPropagation();renameProject('\${escapeHtml(s.cwd)}','\${escapeHtml(s.projectName)}',this)">\${escapeHtml(getDisplayName(s.cwd, s.projectName))}</div>
           <div class="pixel-status" style="color:\${getStatusColor(s.status)}">\${getStatusLabel(s.status)}</div>
           <button class="quick-terminal" onclick="event.stopPropagation();openTerminal('\${s.tty}','\${s.pid}',event)" style="margin-top:4px">&gt;_ terminal</button>
         </div>
@@ -1688,7 +1724,7 @@ function renderPixel(sessions) {
       return \`
         <div class="pixel-station offline" data-cwd="\${escapeHtml(r.cwd)}" onclick="wakeProject('\${escapeHtml(r.cwd)}', '\${escapeHtml(r.latestSession)}')">
           <canvas id="pxr-\${r.dirKey}" width="200" height="160" style="image-rendering:pixelated"></canvas>
-          <div class="pixel-label">\${escapeHtml(r.projectName)}</div>
+          <div class="pixel-label" ondblclick="event.stopPropagation();renameProject('\${escapeHtml(r.cwd)}','\${escapeHtml(r.projectName)}',this)">\${escapeHtml(getDisplayName(r.cwd, r.projectName))}</div>
           <div class="pixel-status" style="color:#444">offline</div>
           <div class="pixel-last-active">\${r.lastModifiedStr}</div>
         </div>
