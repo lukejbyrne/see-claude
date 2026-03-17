@@ -1896,10 +1896,13 @@ const server = http.createServer((req, res) => {
         const { dir, prompt, skipPerms } = JSON.parse(body);
         let cmd = 'claude';
         if (skipPerms) cmd += ' --dangerously-skip-permissions';
-        if (prompt) cmd += ` "${prompt.replace(/\\/g, '\\\\').replace(/"/g, '\\"')}"`;
-        const dirPath = dir.replace(/"/g, '\\"');
-        const script = `tell application "Terminal"\nactivate\ndo script "cd \\"${dirPath}\\" && ${cmd}"\nend tell`;
-        execSync(`osascript -e '${script.replace(/'/g, "'\"'\"'")}'`, { encoding: 'utf8' });
+        if (prompt) cmd += ' ' + JSON.stringify(prompt);
+        const dirPath = dir.startsWith('/') ? dir : path.join(os.homedir(), dir);
+        const shellCmd = `cd ${JSON.stringify(dirPath)} && ${cmd}`;
+        const scriptFile = `/tmp/see-claude-script-${Date.now()}.scpt`;
+        fs.writeFileSync(scriptFile, `tell application "Terminal"\ndo script ${JSON.stringify(shellCmd)}\nend tell`);
+        execSync(`osascript ${scriptFile}`, { encoding: 'utf8' });
+        try { fs.unlinkSync(scriptFile); } catch {}
         res.writeHead(200, { 'Content-Type': 'application/json' });
         res.end(JSON.stringify({ ok: true }));
       } catch (e) {
@@ -1965,8 +1968,11 @@ const server = http.createServer((req, res) => {
         let cmd = `claude --resume ${sessionId}`;
         if (skipPerms) cmd += ' --dangerously-skip-permissions';
         const dirPath = cwd.startsWith('/') ? cwd : `/${cwd}`;
-        const script = `tell application "Terminal"\ndo script "cd ${dirPath.replace(/"/g, '\\"')} && ${cmd}"\nend tell`;
-        execSync(`osascript -e '${script.replace(/'/g, "'\"'\"'")}'`, { encoding: 'utf8' });
+        const shellCmd = `cd ${JSON.stringify(dirPath)} && ${cmd}`;
+        const scriptFile = `/tmp/see-claude-script-${Date.now()}.scpt`;
+        fs.writeFileSync(scriptFile, `tell application "Terminal"\ndo script ${JSON.stringify(shellCmd)}\nend tell`);
+        execSync(`osascript ${scriptFile}`, { encoding: 'utf8' });
+        try { fs.unlinkSync(scriptFile); } catch {}
         res.writeHead(200, { 'Content-Type': 'application/json' });
         res.end(JSON.stringify({ ok: true }));
       } catch (e) {
