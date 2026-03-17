@@ -1232,6 +1232,27 @@ if ('Notification' in window && Notification.permission === 'default') {
   }, 3000);
 }
 
+// --- Pixel click with dblclick support ---
+let pixelClickTimer = null;
+
+function pixelClick(el, pid, tty, type, cwd, sessionId) {
+  if (pixelClickTimer) { clearTimeout(pixelClickTimer); pixelClickTimer = null; return; }
+  pixelClickTimer = setTimeout(() => {
+    pixelClickTimer = null;
+    if (type === 'live') openPixelDialog(pid, tty);
+    else wakeProject(cwd, sessionId);
+  }, 250);
+}
+
+// Attach dblclick for rename via event delegation
+document.addEventListener('dblclick', (e) => {
+  const label = e.target.closest('.pixel-label');
+  if (!label || !label.dataset.cwd) return;
+  e.stopPropagation();
+  if (pixelClickTimer) { clearTimeout(pixelClickTimer); pixelClickTimer = null; }
+  renameProject(label.dataset.cwd, label.dataset.fallback, label);
+});
+
 // --- Custom project names ---
 let customNames = JSON.parse(localStorage.getItem('see-claude-names') || '{}');
 
@@ -1712,9 +1733,9 @@ function renderPixel(sessions) {
     if (item.type === 'live') {
       const s = item.session;
       return \`
-        <div class="pixel-station" data-cwd="\${escapeHtml(s.cwd)}" onclick="openPixelDialog('\${s.pid}', '\${s.tty}')">
+        <div class="pixel-station" data-cwd="\${escapeHtml(s.cwd)}" onclick="pixelClick(this, '\${s.pid}', '\${s.tty}', 'live')">
           <canvas id="pxc-\${s.pid}" width="200" height="160" style="image-rendering:pixelated"></canvas>
-          <div class="pixel-label" ondblclick="event.stopPropagation();renameProject('\${escapeHtml(s.cwd)}','\${escapeHtml(s.projectName)}',this)">\${escapeHtml(getDisplayName(s.cwd, s.projectName))}</div>
+          <div class="pixel-label" data-cwd="\${escapeHtml(s.cwd)}" data-fallback="\${escapeHtml(s.projectName)}">\${escapeHtml(getDisplayName(s.cwd, s.projectName))}</div>
           <div class="pixel-status" style="color:\${getStatusColor(s.status)}">\${getStatusLabel(s.status)}</div>
           <button class="quick-terminal" onclick="event.stopPropagation();openTerminal('\${s.tty}','\${s.pid}',event)" style="margin-top:4px">&gt;_ terminal</button>
         </div>
@@ -1722,9 +1743,9 @@ function renderPixel(sessions) {
     } else {
       const r = item.project;
       return \`
-        <div class="pixel-station offline" data-cwd="\${escapeHtml(r.cwd)}" onclick="wakeProject('\${escapeHtml(r.cwd)}', '\${escapeHtml(r.latestSession)}')">
+        <div class="pixel-station offline" data-cwd="\${escapeHtml(r.cwd)}" onclick="pixelClick(this, null, null, 'offline', '\${escapeHtml(r.cwd)}', '\${escapeHtml(r.latestSession)}')">
           <canvas id="pxr-\${r.dirKey}" width="200" height="160" style="image-rendering:pixelated"></canvas>
-          <div class="pixel-label" ondblclick="event.stopPropagation();renameProject('\${escapeHtml(r.cwd)}','\${escapeHtml(r.projectName)}',this)">\${escapeHtml(getDisplayName(r.cwd, r.projectName))}</div>
+          <div class="pixel-label" data-cwd="\${escapeHtml(r.cwd)}" data-fallback="\${escapeHtml(r.projectName)}">\${escapeHtml(getDisplayName(r.cwd, r.projectName))}</div>
           <div class="pixel-status" style="color:#444">offline</div>
           <div class="pixel-last-active">\${r.lastModifiedStr}</div>
         </div>
